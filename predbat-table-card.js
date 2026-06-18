@@ -634,8 +634,8 @@ class PredbatTableCard extends HTMLElement {
     dataArray.forEach((item, index) => {
         
         let newRow = document.createElement('tr');
-		this._attachRowSelection(newRow, item, index);
-
+        this._attachRowSelection(newRow, item, index);
+        
         let isMidnight = false;
         let currentCost;
         columnsToReturn.forEach((column, columnIndex) => { // Use arrow function here
@@ -3708,44 +3708,74 @@ convertTimeStampToFriendly(timestamp){
       return lightenedHexColor;
     }
 
+/* =============================================================================
+ * Predbat Table Card — Multi-row select + bulk override  (drop-in patch)  v4.1
+ * =============================================================================
+ *
+ * v4.1 — bulk actions now TOGGLE
+ *   • If every eligible selected slot already has an action, pressing that
+ *     action removes it from all of them (mirrors the single-slot toggle).
+ *     Otherwise it adds the action to all of them. The active action shows
+ *     green with a "remove" sublabel so the toggle direction is obvious.
+ *
+ * v4 — selection model + correct slot end
+ *   • TWO-TAP RANGE instead of drag. Long-press a row to set one end (it tints
+ *     green). Long-press a second row to set the other end -> the inclusive
+ *     range is selected and the bulk modal opens. Long-press the SAME row twice
+ *     selects just that one slot. This removes all drag/pointer-capture/scroll
+ *     fighting with Home Assistant's own press handling.
+ *   • Slot END is now read from the START of the next row, not assumed to be
+ *     +30 min — Predbat slots aren't all 30 minutes (e.g. a 21:05 row can end
+ *     at 21:40). The modal range label reflects the real boundary.
+ *
+ * INTERACTION
+ *   • Short tap on the time cell  -> existing single-slot popup (unchanged).
+ *   • Long-press (~400ms) row A   -> sets first end (row tints, hint shown).
+ *   • Long-press row B            -> selects A..B inclusive, opens bulk modal.
+ *   • Tap backdrop / Escape / Close -> clears the pending selection.
+ *
+ * DEPLOY  (unchanged — two edits to predbat-table-card.js)
+ *   1) Paste everything below "=== METHODS ===" into the PredbatTableCard
+ *      class, just above `customElements.define("predbat-table-card", ...)`.
+ *   2) In processAndRender(), inside `dataArray.forEach((item, index) => {`,
+ *      directly under `let newRow = document.createElement('tr');`, add:
+ *          this._attachRowSelection(newRow, item, index);
+ * ===========================================================================*/
+
+
+// ============================== METHODS ====================================
+
   _selLazyInit() {
-    if (!this._selected) this._selected = new Set();          // keys = timeframe strings, e.g. "Sat 14:00"
+    if (!this._selected) this._selected = new Set();   // keys = timeframe strings ("Sat 14:00")
     if (this._dragOccurred === undefined) this._dragOccurred = false;
-    if (this._isSelecting === undefined) this._isSelecting = false;
+    if (this._firstEndKey === undefined) this._firstEndKey = null; // first long-pressed row
   }
 
-  // Called once per data row from processAndRender. Stamps identity + wires
-  // the long-press/drag handlers. Divider/total rows never call this, so
-  // elementFromPoint hit-testing on 'tr[data-slot-key]' naturally ignores them.
+  // Called once per data row from processAndRender.
   _attachRowSelection(row, item, index) {
     this._selLazyInit();
 
     const label = item && item["time-column"] && item["time-column"].value;
     if (!label) return;
 
-    // canonical key the manual_* select entities expect ("Sat 14:00" or "14:00:00")
     let key;
     try { key = this.getTimeframeForOverride(label); } catch (_) { key = null; }
     if (!key) return;
 
-    let allowed = false;
-    try {
-      allowed = this.checkRowIsAllowedForOverride(this.getOverrideEntities(), key, index);
-    } catch (_) { allowed = false; }
-
     row.dataset.slotKey = key;
     row.dataset.slotLabel = label;
-    row.dataset.allowed = allowed ? '1' : '0';
     row.style.userSelect = 'none';
     row.style.webkitUserSelect = 'none';
 
+    // Long-press detection (no drag). A small movement or early release cancels
+    // the press and lets the normal tap/click through to the single-slot popup.
     row.addEventListener('pointerdown', (e) => this._onRowPointerDown(e, row));
-    row.addEventListener('pointermove', (e) => this._onRowPointerMove(e, row), { passive: false });
-    row.addEventListener('pointerup',   (e) => this._onRowPointerUp(e, row));
-    row.addEventListener('pointercancel', (e) => this._onRowPointerUp(e, row));
+    row.addEventListener('pointermove', (e) => this._onRowPointerMove(e));
+    row.addEventListener('pointerup', (e) => this._onRowPointerUp(e));
+    row.addEventListener('pointercancel', (e) => this._onRowPointerUp(e));
 
-    // Capture-phase click swallow: after a drag, kill the trailing click so the
-    // existing single-slot popup (bound on the <td>) doesn't also fire.
+    // Capture-phase click swallow: after a long-press, kill the trailing click
+    // so the single-slot popup (bound on the <td>) doesn't also fire.
     row.addEventListener('click', (e) => {
       if (this._dragOccurred) {
         e.stopPropagation();
@@ -3759,85 +3789,68 @@ convertTimeStampToFriendly(timestamp){
     if (e.button !== undefined && e.button !== 0) return; // primary / touch only
     this._selLazyInit();
 
-    this._pointerStart = { x: e.clientX, y: e.clientY, id: e.pointerId, row };
+    this._pressStart = { x: e.clientX, y: e.clientY };
     this._dragOccurred = false;
-    this._isSelecting = false;
 
     clearTimeout(this._lpTimer);
     this._lpTimer = setTimeout(() => {
-      // Long-press fired: enter selection mode.
-      this._isSelecting = true;
-      this._dragOccurred = true; // ensures the eventual click is swallowed
+      this._dragOccurred = true; // swallow the trailing click
       if (navigator.vibrate) { try { navigator.vibrate(15); } catch (_) {} }
-
-      // Snapshot current row order straight from the DOM (document order).
-      this._orderedKeys = [...this.content.querySelectorAll('tr[data-slot-key]')]
-        .map(r => r.dataset.slotKey);
-
-      this._anchorKey = row.dataset.slotKey;
-      this._selected.clear();
-      this._setScrollLock(true);
-      try { row.setPointerCapture(this._pointerStart.id); } catch (_) {}
-      this._applyRangeTo(row.dataset.slotKey);
+      this._onLongPress(row.dataset.slotKey);
     }, 400);
   }
 
-  _onRowPointerMove(e, row) {
-    if (!this._pointerStart) return;
+  _onRowPointerMove(e) {
+    if (!this._pressStart) return;
+    const dx = Math.abs(e.clientX - this._pressStart.x);
+    const dy = Math.abs(e.clientY - this._pressStart.y);
+    if (dx > 10 || dy > 10) clearTimeout(this._lpTimer); // moved -> it's a scroll/tap
+  }
 
-    if (!this._isSelecting) {
-      // Moved before the long-press fired -> treat as scroll/tap, abort the press.
-      const dx = Math.abs(e.clientX - this._pointerStart.x);
-      const dy = Math.abs(e.clientY - this._pointerStart.y);
-      if (dx > 10 || dy > 10) clearTimeout(this._lpTimer);
+  _onRowPointerUp() {
+    clearTimeout(this._lpTimer);
+    this._pressStart = null;
+  }
+
+  // Core two-tap logic.
+  _onLongPress(key) {
+    if (!key) return;
+
+    if (!this._firstEndKey) {
+      // First end: mark the anchor and wait for the second long-press.
+      this._firstEndKey = key;
+      this._selected = new Set([key]);
+      this._refreshSelectionStyles();
+      this._showPendingHint();
       return;
     }
 
-    e.preventDefault(); // stop the page scrolling while extending the selection
-    const el = document.elementFromPoint(e.clientX, e.clientY);
-    const overRow = el && el.closest && el.closest('tr[data-slot-key]');
-    if (overRow) this._applyRangeTo(overRow.dataset.slotKey);
-  }
-
-  _onRowPointerUp(e, row) {
-    clearTimeout(this._lpTimer);
-    const wasSelecting = this._isSelecting;
-    this._isSelecting = false;
-    this._pointerStart = null;
-    this._setScrollLock(false);
-    try { row.releasePointerCapture(e.pointerId); } catch (_) {}
-
-    if (wasSelecting) {
-      this._dragOccurred = true; // swallow the trailing click
-      if (this._selected && this._selected.size > 0) this._openBulkOverrideModal();
-    }
-  }
-
-  // Recompute the contiguous range between the anchor and the current row,
-  // then sync the highlight to match.
-  _applyRangeTo(key) {
-    const order = this._orderedKeys || [];
-    const a = order.indexOf(this._anchorKey);
+    // Second end: build the inclusive range between the two ends, then open.
+    const order = [...this.content.querySelectorAll('tr[data-slot-key]')]
+      .map(r => r.dataset.slotKey);
+    const a = order.indexOf(this._firstEndKey);
     const b = order.indexOf(key);
-    if (a === -1 || b === -1) return;
+    this._firstEndKey = null;
+    this._hidePendingHint();
+
+    if (a === -1 || b === -1) { this._clearSelection(); return; }
 
     const lo = Math.min(a, b);
     const hi = Math.max(a, b);
-    const next = new Set(order.slice(lo, hi + 1));
+    this._selected = new Set(order.slice(lo, hi + 1));
+    this._refreshSelectionStyles();
 
+    if (this._selected.size > 0) this._openBulkOverrideModal();
+  }
+
+  _refreshSelectionStyles() {
     this.content.querySelectorAll('tr[data-slot-key]').forEach(r => {
-      const on = next.has(r.dataset.slotKey);
-      const isOn = r.dataset.pbSelected === '1';
-      if (on !== isOn) this._setRowSelected(r, on);
+      this._setRowSelected(r, this._selected.has(r.dataset.slotKey));
     });
-
-    this._selected = next;
   }
 
   _setRowSelected(row, on) {
     row.dataset.pbSelected = on ? '1' : '0';
-    // Inset tint overlays whatever the row/cell background is, in light or dark
-    // mode, and reuses the card's existing "active override" green.
     row.querySelectorAll('td').forEach(td => {
       td.style.boxShadow = on ? 'inset 0 0 0 9999px rgba(58, 238, 133, 0.22)' : '';
     });
@@ -3850,41 +3863,64 @@ convertTimeStampToFriendly(timestamp){
       });
     }
     if (this._selected) this._selected.clear();
-    this._anchorKey = null;
-    this._orderedKeys = null;
+    this._firstEndKey = null;
+    this._hidePendingHint();
   }
 
-  _setScrollLock(on) {
-    const tbl = this.content && this.content.querySelector('#predbat-table');
-    if (tbl) tbl.style.touchAction = on ? 'none' : '';
+  // Small floating hint shown after the first long-press.
+  _showPendingHint() {
+    this._hidePendingHint();
+    const hint = document.createElement('div');
+    hint.id = 'predbat-pending-hint';
+    Object.assign(hint.style, {
+      position: 'fixed', bottom: '16px', left: '50%', transform: 'translateX(-50%)',
+      background: 'rgba(0,0,0,0.85)', color: 'var(--text-primary-color, #fff)',
+      border: '1px solid var(--text-primary-color, #fff)', borderRadius: '8px',
+      padding: '8px 14px', fontSize: '13px', zIndex: '10001',
+      boxShadow: '0 2px 10px rgba(0,0,0,0.6)', cursor: 'pointer',
+    });
+    hint.textContent = 'Long-press another row to set the range  •  tap to cancel';
+    hint.addEventListener('click', () => this._clearSelection());
+    document.body.appendChild(hint);
   }
 
-  // "Sat 14:00 → Sun 02:30" — start of first slot to end of last slot (+30m).
+  _hidePendingHint() {
+    const hint = document.getElementById('predbat-pending-hint');
+    if (hint) hint.remove();
+  }
+
+  // "Sat 14:00 -> Sun 02:30": start of first slot to END of last slot. The end
+  // is the START of the row AFTER the last selected one (slots are not all
+  // 30 min). Falls back to last label if it's the final row.
   _selectionRangeText() {
-    const rows = [...this.content.querySelectorAll('tr[data-slot-key]')]
-      .filter(r => this._selected.has(r.dataset.slotKey));
-    if (!rows.length) return '';
+    const allRows = [...this.content.querySelectorAll('tr[data-slot-key]')];
+    const selRows = allRows.filter(r => this._selected.has(r.dataset.slotKey));
+    if (!selRows.length) return '';
 
-    const firstLabel = rows[0].dataset.slotLabel;
-    const lastLabel = rows[rows.length - 1].dataset.slotLabel;
+    const firstLabel = selRows[0].dataset.slotLabel;
+    const lastRow = selRows[selRows.length - 1];
+    const lastIdx = allRows.indexOf(lastRow);
+    const nextRow = allRows[lastIdx + 1];
 
-    let endText = lastLabel;
-    try {
-      const d = this.getStringToDate(lastLabel);     // handles "Sat 14:00"
-      d.setMinutes(d.getMinutes() + 30);
-      const fmt = new Intl.DateTimeFormat('en-GB', {
-        weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
-      });
-      endText = fmt.format(d).replace(',', '');
-    } catch (_) { /* leave endText as the raw last label */ }
-
+    const endText = nextRow ? nextRow.dataset.slotLabel : lastRow.dataset.slotLabel;
     return `${firstLabel} \u2192 ${endText}`;
   }
 
-  // Apply one override entity to every eligible selected slot.
-  // Mirrors createButtonForOverrides: read current list, fire 'off', then
-  // re-add the union (existing + newly selected). Sequenced with await so
-  // Predbat's select entity doesn't drop entries.
+  // Is every eligible selected slot already set to this action? If so a press
+  // should REMOVE (toggle off), mirroring the single-slot button behaviour.
+  _bulkWouldRemove(entityObject) {
+    const stateObj = this._hass.states[entityObject.entityName];
+    if (!stateObj) return false;
+    const allowedOpts = (stateObj.attributes && stateObj.attributes.options) || [];
+    const current = this.getArrayForEntityForceStates(stateObj).map(s => s.trim()).filter(Boolean);
+    const eligible = [...this._selected].filter(k => allowedOpts.includes(k));
+    return eligible.length > 0 && eligible.every(k => current.includes(k));
+  }
+
+  // Toggle one override entity across every eligible selected slot. If all
+  // eligible slots already have it -> remove them; otherwise -> add them.
+  // Either way: fire 'off' to clear, then re-add the resulting list, so
+  // overrides on slots outside the selection are preserved.
   async _applyOverrideToSelection(entityObject) {
     if (this._bulkApplying) return { applied: 0, total: this._selected.size, busy: true };
     this._bulkApplying = true;
@@ -3899,29 +3935,37 @@ convertTimeStampToFriendly(timestamp){
 
       const selectedKeys = [...this._selected];
       const eligible = selectedKeys.filter(k => allowedOpts.includes(k));
+      const removing = eligible.length > 0 && eligible.every(k => current.includes(k));
 
-      const union = [...current];
-      for (const k of eligible) if (!union.includes(k)) union.push(k);
+      let next;
+      if (removing) {
+        // Drop the selected slots, keep everything else.
+        const drop = new Set(eligible);
+        next = current.filter(k => !drop.has(k));
+      } else {
+        // Add the selected slots to whatever's already there.
+        next = [...current];
+        for (const k of eligible) if (!next.includes(k)) next.push(k);
+      }
 
-      // Clear, then re-add the whole list (off == clear for these selects).
       await this._hass.callService('select', 'select_option', {
         entity_id: entityId, option: 'off',
       });
-      for (const opt of union) {
+      for (const opt of next) {
         await this._hass.callService('select', 'select_option', {
           entity_id: entityId, option: opt,
         });
         await new Promise(r => setTimeout(r, 150));
       }
 
-      return { applied: eligible.length, total: selectedKeys.length };
+      return { applied: eligible.length, total: selectedKeys.length, removed: removing };
     } finally {
       this._bulkApplying = false;
     }
   }
 
   _openBulkOverrideModal() {
-    // SoC excluded from bulk in v1 (per-slot value payload + its own popup).
+    // SoC excluded from bulk (per-slot value payload + its own popup).
     const forceEntities = this.getOverrideEntities()
       .filter(e => !e.entityName.endsWith('_manual_soc'));
 
@@ -3935,7 +3979,6 @@ convertTimeStampToFriendly(timestamp){
       modalBox.style.maxWidth = '380px';
       modalBox.style.minWidth = '300px';
 
-      // --- header (title + close), matching the existing override popup ---
       const headerRow = document.createElement('div');
       headerRow.style.display = 'flex';
       headerRow.style.flexDirection = 'column';
@@ -3977,7 +4020,6 @@ convertTimeStampToFriendly(timestamp){
       modalBox.appendChild(closeBox);
       modalBox.appendChild(headerRow);
 
-      // --- status line (feedback after applying) ---
       const status = document.createElement('div');
       status.style.minHeight = '16px';
       status.style.fontSize = '12px';
@@ -3985,7 +4027,6 @@ convertTimeStampToFriendly(timestamp){
       status.style.color = 'rgb(58, 238, 133)';
       status.style.marginBottom = '10px';
 
-      // --- action buttons ---
       const buttonBox = document.createElement('div');
       buttonBox.style.display = 'flex';
       buttonBox.style.flexWrap = 'wrap';
@@ -3997,6 +4038,7 @@ convertTimeStampToFriendly(timestamp){
           && this._hass.states[ent.entityName].attributes
           && this._hass.states[ent.entityName].attributes.options) || [];
         const eligible = [...this._selected].filter(k => opts.includes(k)).length;
+        const willRemove = this._bulkWouldRemove(ent);
         const key = ent.entityName.replace(/^.*_manual_/, '');
 
         const btn = document.createElement('div');
@@ -4024,20 +4066,25 @@ convertTimeStampToFriendly(timestamp){
         label.style.lineHeight = '1.1';
 
         const eligLabel = document.createElement('div');
-        eligLabel.textContent = `${eligible}/${count}`;
+        eligLabel.textContent = willRemove ? 'remove' : `${eligible}/${count}`;
         eligLabel.style.fontSize = '9px';
         eligLabel.style.opacity = '0.7';
         eligLabel.style.color = 'var(--text-primary-color)';
         eligLabel.style.marginTop = '1px';
+
+        // Mirror the single-slot UI: an action already set across the whole
+        // selection shows green, signalling the next press will toggle it off.
+        if (willRemove) iconEl.style.color = 'rgb(58, 238, 133)';
 
         if (eligible > 0) {
           btn.addEventListener('click', async () => {
             status.textContent = 'Applying\u2026';
             const res = await this._applyOverrideToSelection(ent);
             if (res && res.busy) return;
+            const verb = res.removed ? 'Removed from' : 'Applied to';
             status.textContent = (res.applied < res.total)
-              ? `Applied to ${res.applied} of ${res.total} (${res.total - res.applied} unavailable)`
-              : `Applied to ${res.applied} slot${res.applied === 1 ? '' : 's'}`;
+              ? `${verb} ${res.applied} of ${res.total} (${res.total - res.applied} unavailable)`
+              : `${verb} ${res.applied} slot${res.applied === 1 ? '' : 's'}`;
             setTimeout(fullClose, 900);
           });
         }
@@ -4063,8 +4110,8 @@ convertTimeStampToFriendly(timestamp){
       return modalBox;
     });
 
-    // openModal's own backdrop-click / ESC just remove the overlay; make sure
-    // those paths also clear the selection highlight.
+    // openModal's own backdrop-click / ESC just remove the overlay; make those
+    // paths clear the selection highlight too.
     if (ctrl && ctrl.overlay) {
       ctrl.overlay.addEventListener('click', (e) => {
         if (e.target === ctrl.overlay) this._clearSelection();
@@ -4077,7 +4124,9 @@ convertTimeStampToFriendly(timestamp){
       };
       document.addEventListener('keydown', escClear);
     }
-  }	
+  }
+
+// ============================ END METHODS ==================================
 }
 
 customElements.define("predbat-table-card", PredbatTableCard);
