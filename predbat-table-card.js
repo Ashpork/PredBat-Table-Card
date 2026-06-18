@@ -3708,53 +3708,6 @@ convertTimeStampToFriendly(timestamp){
       return lightenedHexColor;
     }
 
-	/* =============================================================================
- * Predbat Table Card — Multi-row select + bulk override  (drop-in patch)
- * =============================================================================
- *
- * WHAT THIS ADDS
- *   • Long-press (~400ms) any plan row to enter "selection mode".
- *   • Keep your finger/mouse down and swipe up or down to select a range of rows.
- *   • Release to open a bulk-override modal showing the day/time range + slot
- *     count, with one button per override (Demand / Charge / Export /
- *     Freeze Charge / Freeze Export). Tapping a button applies it to every
- *     eligible selected slot.
- *   • A short tap still does exactly what it does today (opens the single-slot
- *     popup), so nothing existing breaks.
- *
- * HOW TO DEPLOY  (two edits to predbat-table-card.js)
- *
- *   1) Paste EVERYTHING below the "=== METHODS ===" line into the
- *      PredbatTableCard class — just before the final closing brace "}" of the
- *      class (i.e. immediately above the line
- *      `customElements.define("predbat-table-card", PredbatTableCard);`).
- *
- *   2) In processAndRender(), inside the main data loop, add ONE line.
- *      Find this (it's the per-row creation inside dataArray.forEach):
- *
- *          dataArray.forEach((item, index) => {
- *
- *              let newRow = document.createElement('tr');
- *
- *      and add the call directly under it so it becomes:
- *
- *          dataArray.forEach((item, index) => {
- *
- *              let newRow = document.createElement('tr');
- *              this._attachRowSelection(newRow, item, index);   // <-- ADD THIS
- *
- * That's it. No YAML changes. Works with the existing time-column tap and the
- * options-popup-column / options-column.
- *
- * NOTE ON TOUCH: long-press-then-drag needs the browser to stop scrolling once
- * selection begins. Because the long-press only fires after the finger has been
- * held still (any move >10px before it fires aborts it), no scroll is in
- * progress when we lock, so setting touch-action:none on the table then takes
- * effect for the drag. If a particular device still fights it, that's the cue
- * to fall back to a dedicated drag-handle column.
- * ===========================================================================*/
-
-
   _selLazyInit() {
     if (!this._selected) this._selected = new Set();          // keys = timeframe strings, e.g. "Sat 14:00"
     if (this._dragOccurred === undefined) this._dragOccurred = false;
