@@ -3709,10 +3709,17 @@ convertTimeStampToFriendly(timestamp){
     }
 
 /* =============================================================================
- * Predbat Table Card — Multi-row select + bulk override  (drop-in patch)  v4.1
+ * Predbat Table Card — Multi-row select + bulk override  (drop-in patch)  v4.2
  * =============================================================================
  *
- * v4.1 — bulk actions now TOGGLE
+ * v4.2 — fix remove/toggle
+ *   • Removing a bulk action now works. Add-eligibility is checked against the
+ *     entity's OPTIONS (what you can add); remove-eligibility against the
+ *     entity STATE (what's actually set). Previously both used OPTIONS, so an
+ *     already-set slot (which often isn't in options) looked un-actionable and
+ *     the button showed the not-allowed cursor.
+ *
+ * v4.1 — bulk actions TOGGLE
  *   • If every eligible selected slot already has an action, pressing that
  *     action removes it from all of them (mirrors the single-slot toggle).
  *     Otherwise it adds the action to all of them. The active action shows
@@ -3906,46 +3913,44 @@ convertTimeStampToFriendly(timestamp){
     return `${firstLabel} \u2192 ${endText}`;
   }
 
-  // Is every eligible selected slot already set to this action? If so a press
-  // should REMOVE (toggle off), mirroring the single-slot button behaviour.
-  _bulkWouldRemove(entityObject) {
+  // Work out what a press on this action would do for the current selection.
+  //   removable = selected slots already set (from the entity STATE list)
+  //   addable   = selected slots not yet set but offered (from entity OPTIONS)
+  // Removal must look at STATE, not OPTIONS — an already-set slot is often no
+  // longer listed in options, which is why the button looked disabled before.
+  // Direction: if there's anything to add -> ADD (fill the gaps); if nothing to
+  // add but something is set -> REMOVE (toggle off).
+  _bulkActionInfo(entityObject) {
     const stateObj = this._hass.states[entityObject.entityName];
-    if (!stateObj) return false;
-    const allowedOpts = (stateObj.attributes && stateObj.attributes.options) || [];
+    if (!stateObj) return { addable: [], removable: [], willRemove: false, actionable: 0, current: [] };
+    const options = (stateObj.attributes && stateObj.attributes.options) || [];
     const current = this.getArrayForEntityForceStates(stateObj).map(s => s.trim()).filter(Boolean);
-    const eligible = [...this._selected].filter(k => allowedOpts.includes(k));
-    return eligible.length > 0 && eligible.every(k => current.includes(k));
+    const selectedKeys = [...this._selected];
+    const removable = selectedKeys.filter(k => current.includes(k));
+    const addable = selectedKeys.filter(k => options.includes(k) && !current.includes(k));
+    const willRemove = removable.length > 0 && addable.length === 0;
+    return { addable, removable, willRemove, actionable: addable.length + removable.length, current };
   }
 
-  // Toggle one override entity across every eligible selected slot. If all
-  // eligible slots already have it -> remove them; otherwise -> add them.
-  // Either way: fire 'off' to clear, then re-add the resulting list, so
-  // overrides on slots outside the selection are preserved.
+  // Toggle one override entity across the selection. ADD mode fills the slots
+  // that aren't set yet; REMOVE mode clears the ones that are. Either way: fire
+  // 'off' to clear the entity, then re-add the resulting list, so overrides on
+  // slots outside the selection are preserved.
   async _applyOverrideToSelection(entityObject) {
     if (this._bulkApplying) return { applied: 0, total: this._selected.size, busy: true };
     this._bulkApplying = true;
     try {
       const entityId = entityObject.entityName;
-      const stateObj = this._hass.states[entityId];
-      if (!stateObj) return { applied: 0, total: this._selected.size };
-
-      const allowedOpts = (stateObj.attributes && stateObj.attributes.options) || [];
-      const current = this.getArrayForEntityForceStates(stateObj)
-        .map(s => s.trim()).filter(Boolean);
-
-      const selectedKeys = [...this._selected];
-      const eligible = selectedKeys.filter(k => allowedOpts.includes(k));
-      const removing = eligible.length > 0 && eligible.every(k => current.includes(k));
+      const info = this._bulkActionInfo(entityObject);
+      if (info.actionable === 0) return { applied: 0, total: this._selected.size, removed: false };
 
       let next;
-      if (removing) {
-        // Drop the selected slots, keep everything else.
-        const drop = new Set(eligible);
-        next = current.filter(k => !drop.has(k));
+      if (info.willRemove) {
+        const drop = new Set(info.removable);
+        next = info.current.filter(k => !drop.has(k));
       } else {
-        // Add the selected slots to whatever's already there.
-        next = [...current];
-        for (const k of eligible) if (!next.includes(k)) next.push(k);
+        next = [...info.current];
+        for (const k of info.addable) if (!next.includes(k)) next.push(k);
       }
 
       await this._hass.callService('select', 'select_option', {
@@ -3958,7 +3963,8 @@ convertTimeStampToFriendly(timestamp){
         await new Promise(r => setTimeout(r, 150));
       }
 
-      return { applied: eligible.length, total: selectedKeys.length, removed: removing };
+      const affected = info.willRemove ? info.removable.length : info.addable.length;
+      return { applied: affected, total: this._selected.size, removed: info.willRemove };
     } finally {
       this._bulkApplying = false;
     }
@@ -4034,11 +4040,9 @@ convertTimeStampToFriendly(timestamp){
       buttonBox.style.gap = '6px';
 
       for (const ent of forceEntities) {
-        const opts = (this._hass.states[ent.entityName]
-          && this._hass.states[ent.entityName].attributes
-          && this._hass.states[ent.entityName].attributes.options) || [];
-        const eligible = [...this._selected].filter(k => opts.includes(k)).length;
-        const willRemove = this._bulkWouldRemove(ent);
+        const info = this._bulkActionInfo(ent);
+        const actionable = info.actionable;
+        const willRemove = info.willRemove;
         const key = ent.entityName.replace(/^.*_manual_/, '');
 
         const btn = document.createElement('div');
@@ -4047,8 +4051,8 @@ convertTimeStampToFriendly(timestamp){
         btn.style.alignItems = 'center';
         btn.style.justifyContent = 'flex-start';
         btn.style.width = '64px';
-        btn.style.cursor = eligible > 0 ? 'pointer' : 'not-allowed';
-        btn.style.opacity = eligible > 0 ? '1' : '0.3';
+        btn.style.cursor = actionable > 0 ? 'pointer' : 'not-allowed';
+        btn.style.opacity = actionable > 0 ? '1' : '0.3';
 
         const iconEl = document.createElement('ha-icon');
         iconEl.setAttribute('icon', ent.entityIcon);
@@ -4066,7 +4070,7 @@ convertTimeStampToFriendly(timestamp){
         label.style.lineHeight = '1.1';
 
         const eligLabel = document.createElement('div');
-        eligLabel.textContent = willRemove ? 'remove' : `${eligible}/${count}`;
+        eligLabel.textContent = willRemove ? 'remove' : `${info.addable.length}/${count}`;
         eligLabel.style.fontSize = '9px';
         eligLabel.style.opacity = '0.7';
         eligLabel.style.color = 'var(--text-primary-color)';
@@ -4076,7 +4080,7 @@ convertTimeStampToFriendly(timestamp){
         // selection shows green, signalling the next press will toggle it off.
         if (willRemove) iconEl.style.color = 'rgb(58, 238, 133)';
 
-        if (eligible > 0) {
+        if (actionable > 0) {
           btn.addEventListener('click', async () => {
             status.textContent = 'Applying\u2026';
             const res = await this._applyOverrideToSelection(ent);
