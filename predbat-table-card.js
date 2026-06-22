@@ -3707,10 +3707,16 @@ convertTimeStampToFriendly(timestamp){
     
       return lightenedHexColor;
     }
-
 /* =============================================================================
- * Predbat Table Card — Multi-row select + bulk override  (drop-in patch)  v4.2
+ * Predbat Table Card — Multi-row select + bulk override  (drop-in patch)  v4.3
  * =============================================================================
+ *
+ * v4.3 — long-press to start, short tap to finish
+ *   • First end: long-press a row (as before). Second end: a normal SHORT TAP
+ *     on any row now completes the range. While a range is pending the tap is
+ *     intercepted, so the original single-slot popup no longer pops up and
+ *     competes with the pending selection. Both entry paths open the same
+ *     bulk modal.
  *
  * v4.2 — fix remove/toggle
  *   • Removing a bulk action now works. Add-eligibility is checked against the
@@ -3736,10 +3742,10 @@ convertTimeStampToFriendly(timestamp){
  *     at 21:40). The modal range label reflects the real boundary.
  *
  * INTERACTION
- *   • Short tap on the time cell  -> existing single-slot popup (unchanged).
+ *   • Short tap on a row (no range pending) -> existing single-slot popup.
  *   • Long-press (~400ms) row A   -> sets first end (row tints, hint shown).
- *   • Long-press row B            -> selects A..B inclusive, opens bulk modal.
- *   • Tap backdrop / Escape / Close -> clears the pending selection.
+ *   • Short tap row B             -> selects A..B inclusive, opens bulk modal.
+ *   • Tap the hint / Escape / backdrop / Close -> clears the pending selection.
  *
  * DEPLOY  (unchanged — two edits to predbat-table-card.js)
  *   1) Paste everything below "=== METHODS ===" into the PredbatTableCard
@@ -3781,13 +3787,21 @@ convertTimeStampToFriendly(timestamp){
     row.addEventListener('pointerup', (e) => this._onRowPointerUp(e));
     row.addEventListener('pointercancel', (e) => this._onRowPointerUp(e));
 
-    // Capture-phase click swallow: after a long-press, kill the trailing click
-    // so the single-slot popup (bound on the <td>) doesn't also fire.
+    // Capture-phase click handler. Runs before the <td>'s own click listener.
+    //  - After a long-press: swallow the trailing click (already handled).
+    //  - While a range is PENDING: a short tap completes the range here, and we
+    //    swallow it so the original single-slot popup can't also open.
     row.addEventListener('click', (e) => {
       if (this._dragOccurred) {
         e.stopPropagation();
         e.preventDefault();
         this._dragOccurred = false;
+        return;
+      }
+      if (this._firstEndKey) {
+        e.stopPropagation();
+        e.preventDefault();
+        this._onLongPress(row.dataset.slotKey); // completes the range
       }
     }, true);
   }
@@ -3886,7 +3900,7 @@ convertTimeStampToFriendly(timestamp){
       padding: '8px 14px', fontSize: '13px', zIndex: '10001',
       boxShadow: '0 2px 10px rgba(0,0,0,0.6)', cursor: 'pointer',
     });
-    hint.textContent = 'Long-press another row to set the range  •  tap to cancel';
+    hint.textContent = 'Tap another row to set the range  •  tap here to cancel';
     hint.addEventListener('click', () => this._clearSelection());
     document.body.appendChild(hint);
   }
