@@ -88,6 +88,7 @@ class PredbatTableCard extends HTMLElement {
                 { name: "hide_empty_columns", selector: { boolean: {} } },
                 { name: "use_friendly_states", selector: { boolean: {} } },
                 { name: "stack_pills", selector: { boolean: {} } }, 
+                { name: "remove_import_export_pill_style", selector: { boolean: {} } }, 
                 { name: "debug_prices_only", selector: { boolean: {} } }, 
                 { name: "reset_day_totals", selector: { boolean: {} } }, 
                 {
@@ -318,6 +319,7 @@ class PredbatTableCard extends HTMLElement {
         if (schema.name === "odd_row_colour_light") return "Light Row Colour (odd)";
         if (schema.name === "even_row_colour") return "Dark Row Colour (even)";
         if (schema.name === "even_row_colour_light") return "Light Row Colour (even)";
+        if (schema.name === "remove_import_export_pill_style") return "Show Import/Export as plain text?";
         if (schema.name === "debug_prices_only") return "Show Debug Prices Only?";
         if (schema.name === "weather_entity") return "Weather Entity";        
         if (schema.name === "path_for_click") return "Dashboard Path for click";
@@ -363,6 +365,8 @@ class PredbatTableCard extends HTMLElement {
             return "Shows the kWh capacity of your battery in the SoC column";      
           case "debug_columns":
             return "Choose which columns reflect the HTML Debug Settings when enabled in Predbat";   
+          case "remove_import_export_pill_style":
+            return "Display import and export prices as plain coloured text instead of pill badges";
           case "debug_prices_only":
             return "If you have enabled Predbat's HTML Plan debug, set to true to only show the adjusted prices, rather than the default (actual and adjusted prices). Important: Only works if HTML Plan debug is enabled";
           case "weather_entity":
@@ -1895,6 +1899,20 @@ getTimeframeForOverride(timeString) {
             // Import Export Column
             
             if(column === "import-export-column"){
+              if(this.config.remove_import_export_pill_style === true){
+                // plain coloured text mode (no pill badges)
+                let plainParts = [];
+                theItem.forEach((item, index) => {
+                    let contentWithoutTags = pricesStringFromRaw;
+                    if(this.config.debug_prices_only === true){
+                        let priceStrings = this.getPricesFromPriceString(contentWithoutTags, hasBoldTags, hasItalicTags, true);
+                        plainParts.push(this.getTransformedCostToPlainText({"value": priceStrings[1], "color": item.color}, darkMode));
+                    } else {
+                        plainParts.push(this.getTransformedCostToPlainText(item, darkMode));
+                    }
+                });
+                cellResponseArray.push(plainParts.join(' / '));
+              } else {
                 let newPills = "";
                 let newPillsNoContainer = "";
                 theItem.forEach((item, index) => {
@@ -1924,7 +1942,8 @@ getTimeframeForOverride(timeString) {
                     cellResponseArray.push('<div class="iconContainer">' + newPillsNoContainer + '</div>');
                 } else {
                     cellResponseArray.push('<div class="multiPillContainer">' + newPills + '</div>');
-                }                
+                }
+              }
             }
                 
     
@@ -1944,6 +1963,28 @@ getTimeframeForOverride(timeString) {
                         cellResponseArray.push(rawValue);
                     }
                         
+                } else if(this.config.remove_import_export_pill_style === true){
+                    // plain coloured text mode (no pill badges)
+                    
+                    let contentWithoutTags = pricesStringFromRaw;
+                    
+                    if(hasDebug && useDebug){
+                        let priceStrings;
+                        if(this.config.debug_prices_only === true){
+                            priceStrings = this.getPricesFromPriceString(contentWithoutTags, hasBoldTags, hasItalicTags, true);
+                            cellResponseArray.push(this.getTransformedCostToPlainText({"value":priceStrings[1], "color":theItem.color}, darkMode));
+                        } else {
+                            priceStrings = this.getPricesFromPriceString(contentWithoutTags, hasBoldTags, hasItalicTags, false);
+                            cellResponseArray.push(this.getTransformedCostToPlainText({"value":priceStrings[0], "color":theItem.color}, darkMode) 
+                                + ' ' + this.getTransformedCostToPlainText({"value":priceStrings[1], "color":theItem.color}, darkMode));
+                        }
+                    } else if(hasDebug){
+                       let priceStrings = this.getPricesFromPriceString(contentWithoutTags, hasBoldTags, hasItalicTags, this.config.debug_prices_only);
+                       cellResponseArray.push(this.getTransformedCostToPlainText({"value":priceStrings[0], "color":theItem.color}, darkMode));
+                    } else {
+                        cellResponseArray.push(this.getTransformedCostToPlainText(theItem, darkMode));
+                    }
+
                 } else {
                     // manage debug price pills appropriately
                     // debug_prices_only | true | false
@@ -2583,6 +2624,23 @@ getTimeframeForOverride(timeString) {
                             </svg>`;
             
             return svgLozenge;
+  }
+
+  getTransformedCostToPlainText(theItem, darkMode){
+            const hasBoldTags = /<b>.*?<\/b>/.test(theItem.value);
+            const hasItalicTags = /<i>.*?<\/i>/.test(theItem.value);
+
+            let contentWithoutTags = theItem.value;
+            if (hasBoldTags || hasItalicTags) {
+                contentWithoutTags = theItem.value.replace(/<b>(.*?)<\/b>/g, '$1');
+                contentWithoutTags = contentWithoutTags.replace(/<i>(.*?)<\/i>/g, '$1');
+            }
+
+            let textColor = theItem.color;
+            let fontWeight = hasBoldTags ? 'font-weight:bold;' : '';
+            let fontStyle = hasItalicTags ? 'font-style:italic;' : '';
+
+            return `<span style="color:${textColor};${fontWeight}${fontStyle}">${contentWithoutTags}</span>`;
   }
   
   getMetadataFromHTML(html) {
